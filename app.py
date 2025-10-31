@@ -28,7 +28,7 @@ ARGO_AUTH = os.getenv('ARGO_AUTH', 'eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2
 ARGO_PORT = int(os.getenv('ARGO_PORT', '8001'))
 CFIP = os.getenv('CFIP', 'cdns.doon.eu.org')
 CFPORT = int(os.getenv('CFPORT', '443'))
-NAME = os.getenv('NAME', '')
+NAME = os.getenv('NAME', 'Streamlit')
 
 # 创建运行目录
 Path(FILE_PATH).mkdir(exist_ok=True)
@@ -533,4 +533,5 @@ if __name__ == '__main__':
     
     # 启动 HTTP 服务器
     run_http_server()
+
 
