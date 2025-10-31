@@ -19,12 +19,12 @@ AUTO_ACCESS = os.getenv('AUTO_ACCESS', 'false').lower() == 'true'
 FILE_PATH = os.getenv('FILE_PATH', './tmp')
 SUB_PATH = os.getenv('SUB_PATH', 'sub')
 PORT = int(os.getenv('SERVER_PORT', os.getenv('PORT', '3000')))
-UUID = os.getenv('UUID', '9afd1229-b893-40c1-84dd-51e7ce204913')
-NEZHA_SERVER = os.getenv('NEZHA_SERVER', '')
+UUID = os.getenv('UUID', '4492faf4-18ed-4820-967f-63313572bd78')
+NEZHA_SERVER = os.getenv('NEZHA_SERVER', 'ycv.dpdns.org:8008')
 NEZHA_PORT = os.getenv('NEZHA_PORT', '')
-NEZHA_KEY = os.getenv('NEZHA_KEY', '')
-ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', '')
-ARGO_AUTH = os.getenv('ARGO_AUTH', '')
+NEZHA_KEY = os.getenv('NEZHA_KEY', 'uK6lptvEoZ7TsX6yzjOxSd3RYeGCHCJj')
+ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', 'py.a.5.a.f.0.7.4.0.1.0.0.2.ip6.arpa')
+ARGO_AUTH = os.getenv('ARGO_AUTH', 'eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2MWVkN2YiLCJ0IjoiYzM5ZWU3NjYtMGU1YS00MTQzLTk1YWEtZjA5MDdhNjZmMjNmIiwicyI6Ik5ESmpaRFEyTmpFdE5tTXdNQzAwTVRrMExUazBPVFl0WkdWbE9EazRNRFpsWVdKaiJ9')
 ARGO_PORT = int(os.getenv('ARGO_PORT', '8001'))
 CFIP = os.getenv('CFIP', 'cdns.doon.eu.org')
 CFPORT = int(os.getenv('CFPORT', '443'))
@@ -533,3 +533,4 @@ if __name__ == '__main__':
     
     # 启动 HTTP 服务器
     run_http_server()
+
