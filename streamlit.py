@@ -1,617 +1,356 @@
+# streamlit.py
+# Streamlit-compatible port of index.js (logic-only, DOES NOT run binaries)
+# Features:
+# - Edit environment variables via UI
+# - Generate config.json, config.yaml (nezha), tunnel.yml
+# - Generate sub.txt (base64) and download
+# - Upload nodes / subscriptions to UPLOAD_URL / PROJECT_URL (via HTTP)
+# - Extract argo domain from uploaded boot.log or pasted text
+# - Trigger "automatic access" API
+# - Logs & status panel
+#
+# NOTE: This script intentionally DOES NOT run binaries, start background services,
+# or call subprocess. It only simulates / reproduces config-generation and
+# network-upload logic so it can run on share.streamlit.io.
+
 import os
-import sys
+import re
 import json
 import base64
-import random
-import string
-import subprocess
-import threading
+import textwrap
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import requests
-import logging
 from pathlib import Path
+from typing import Optional, Tuple
+
+import requests
 import streamlit as st
 
-# 环境变量配置
-UPLOAD_URL = os.getenv('UPLOAD_URL', '')
-PROJECT_URL = os.getenv('PROJECT_URL', '')
-AUTO_ACCESS = os.getenv('AUTO_ACCESS', 'false').lower() == 'true'
-FILE_PATH = os.getenv('FILE_PATH', './tmp')
-SUB_PATH = os.getenv('SUB_PATH', 'sub')
-PORT = int(os.getenv('SERVER_PORT', os.getenv('PORT', '3210')))
-UUID = os.getenv('UUID', '4492faf4-18ed-4820-967f-63313572bd78')
-NEZHA_SERVER = os.getenv('NEZHA_SERVER', 'ycv.dpdns.org:8008')
-NEZHA_PORT = os.getenv('NEZHA_PORT', '')
-NEZHA_KEY = os.getenv('NEZHA_KEY', 'uK6lptvEoZ7TsX6yzjOxSd3RYeGCHCJj')
-ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', 'py.a.5.a.f.0.7.4.0.1.0.0.2.ip6.arpa')
-ARGO_AUTH = os.getenv('ARGO_AUTH', 'eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2MWVkN2YiLCJ0IjoiYzM5ZWU3NjYtMGU1YS00MTQzLTk1YWEtZjA5MDdhNjZmMjNmIiwicyI6Ik5ESmpaRFEyTmpFdE5tTXdNQzAwTVRrMExUazBPVFl0WkdWbE9EazRNRFpsWVdKaiJ9')
-ARGO_PORT = int(os.getenv('ARGO_PORT', '8501'))
-CFIP = os.getenv('CFIP', 'cdns.doon.eu.org')
-CFPORT = int(os.getenv('CFPORT', '443'))
-NAME = os.getenv('NAME', 'Streamlit')
+st.set_page_config(page_title="Streamlit port of index.js (logic-only)", layout="wide")
 
-# 创建运行目录
-Path(FILE_PATH).mkdir(exist_ok=True)
+# -------------------------
+# Helpers
+# -------------------------
+def env_default(key: str, default: str = "") -> str:
+    return os.environ.get(key, default)
 
-# 生成随机文件名
-def generate_random_name(length=6):
-    return ''.join(random.choices(string.ascii_lowercase, k=length))
+def generate_random_name() -> str:
+    import random, string
+    return ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
 
-# 全局文件名
-npm_name = generate_random_name()
-web_name = generate_random_name()
-bot_name = generate_random_name()
-php_name = generate_random_name()
+def log(msg: str, key="main"):
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    msg_line = f"[{now}] {msg}"
+    st.session_state.logs.append(msg_line)
+    # keep last 500 lines
+    if len(st.session_state.logs) > 500:
+        st.session_state.logs = st.session_state.logs[-500:]
 
-npm_path = os.path.join(FILE_PATH, npm_name)
-php_path = os.path.join(FILE_PATH, php_name)
-web_path = os.path.join(FILE_PATH, web_name)
-bot_path = os.path.join(FILE_PATH, bot_name)
-sub_path = os.path.join(FILE_PATH, 'sub.txt')
-list_path = os.path.join(FILE_PATH, 'list.txt')
-boot_log_path = os.path.join(FILE_PATH, 'boot.log')
-config_path = os.path.join(FILE_PATH, 'config.json')
+def download_response_file(filename: str, content: bytes):
+    st.download_button(label=f"Download {filename}", data=content, file_name=filename)
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(b'Hello world!')
-        elif self.path == f'/{SUB_PATH}':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            if os.path.exists(sub_path):
-                with open(sub_path, 'r') as f:
-                    content = f.read()
-                self.wfile.write(content.encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
+# -------------------------
+# Init session state
+# -------------------------
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-    def log_message(self, format, *args):
-        # 禁用默认的日志输出
-        pass
+if "generated" not in st.session_state:
+    st.session_state.generated = {}
 
-# 删除历史节点
-def delete_nodes():
-    if not UPLOAD_URL or not os.path.exists(sub_path):
-        return
-    
-    try:
-        with open(sub_path, 'r') as f:
-            file_content = f.read()
-        
-        decoded = base64.b64decode(file_content).decode('utf-8')
-        nodes = [line for line in decoded.split('\n') if any(proto in line for proto in ['vless://', 'vmess://', 'trojan://', 'hysteria2://', 'tuic://'])]
-        
-        if nodes:
-            requests.post(f'{UPLOAD_URL}/api/delete-nodes', 
-                         json={'nodes': nodes},
-                         headers={'Content-Type': 'application/json'})
-    except Exception:
-        pass
+# -------------------------
+# Sidebar: basic env / params
+# -------------------------
+st.sidebar.header("Environment / Settings")
 
-# 清理历史文件
-def cleanup_old_files():
-    try:
-        for file in os.listdir(FILE_PATH):
-            file_path = os.path.join(FILE_PATH, file)
+UPLOAD_URL = st.sidebar.text_input("UPLOAD_URL", value=env_default("UPLOAD_URL", ""))
+PROJECT_URL = st.sidebar.text_input("PROJECT_URL", value=env_default("PROJECT_URL", ""))
+AUTO_ACCESS = st.sidebar.checkbox("AUTO_ACCESS", value=(env_default("AUTO_ACCESS", "false").lower() == "true"))
+FILE_PATH = st.sidebar.text_input("FILE_PATH", value=env_default("FILE_PATH", "./tmp"))
+SUB_PATH = st.sidebar.text_input("SUB_PATH", value=env_default("SUB_PATH", "sub"))
+PORT = st.sidebar.text_input("PORT (ignored in Streamlit)", value=env_default("PORT", "3000"))
+UUID = st.sidebar.text_input("UUID", value=env_default("UUID", "1c56e2c7-8c4f-4d3d-8f93-2ab64854325a"))
+NEZHA_SERVER = st.sidebar.text_input("NEZHA_SERVER", value=env_default("NEZHA_SERVER", "ycv.dpdns.org:8008"))
+NEZHA_PORT = st.sidebar.text_input("NEZHA_PORT", value=env_default("NEZHA_PORT", ""))
+NEZHA_KEY = st.sidebar.text_input("NEZHA_KEY", value=env_default("NEZHA_KEY", "uK6lptvEoZ7TsX6yzjOxSd3RYeGCHCJj"))
+ARGO_DOMAIN = st.sidebar.text_input("ARGO_DOMAIN", value=env_default("ARGO_DOMAIN", "py.a.5.a.f.0.7.4.0.1.0.0.2.ip6.arpa"))
+ARGO_AUTH = st.sidebar.text_input("ARGO_AUTH", value=env_default("ARGO_AUTH", "eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2MWVkN2YiLCJ0IjoiYzM5ZWU3NjYtMGU1YS00MTQzLTk1YWEtZjA5MDdhNjZmMjNmIiwicyI6Ik5ESmpaRFEyTmpFdE5tTXdNQzAwTVRrMExUazBPVFl0WkdWbE9EazRNRFpsWVdKaiJ9"))
+ARGO_PORT = st.sidebar.text_input("ARGO_PORT", value=env_default("ARGO_PORT", "8051"))
+CFIP = st.sidebar.text_input("CFIP", value=env_default("CFIP", "cdns.doon.eu.org"))
+CFPORT = st.sidebar.text_input("CFPORT", value=env_default("CFPORT", "443"))
+NAME = st.sidebar.text_input("NAME", value=env_default("NAME", "Share"))
+
+architecture = st.sidebar.selectbox("System architecture (for URL suggestions)", options=["amd", "arm"], index=0)
+
+# convenience random names (like original)
+if "random_names" not in st.session_state:
+    st.session_state.random_names = {
+        "npmName": generate_random_name(),
+        "webName": generate_random_name(),
+        "botName": generate_random_name(),
+        "phpName": generate_random_name(),
+    }
+
+st.sidebar.write("Generated binary names (for reference):")
+st.sidebar.write(st.session_state.random_names)
+
+# -------------------------
+# Main UI
+# -------------------------
+st.title("Streamlit port — config & subscription generator (logic-only)")
+st.caption("本页面 **不会** 在服务器上运行二进制或后台服务。它会生成配置文件、订阅信息并可上传到远端 API。")
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.header("1) Generate config.json (xray/xr-ay style)")
+    if st.button("Generate config.json"):
+        cfg = {
+            "log": {"access": "/dev/null", "error": "/dev/null", "loglevel": "none"},
+            "inbounds": [
+                {"port": int(ARGO_PORT), "protocol": "vless", "settings": {"clients": [{"id": UUID, "flow": "xtls-rprx-vision"}], "decryption": "none", "fallbacks": [{"dest": 3001}, {"path": "/vless-argo", "dest": 3002}, {"path": "/vmess-argo", "dest": 3003}, {"path": "/trojan-argo", "dest": 3004}]}, "streamSettings": {"network": "tcp"}},
+                {"port": 3001, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": UUID}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "none"}},
+                {"port": 3002, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": UUID, "level": 0}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vless-argo"}}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}},
+                {"port": 3003, "listen": "127.0.0.1", "protocol": "vmess", "settings": {"clients": [{"id": UUID, "alterId": 0}]}, "streamSettings": {"network": "ws", "wsSettings": {"path": "/vmess-argo"}}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}},
+                {"port": 3004, "listen": "127.0.0.1", "protocol": "trojan", "settings": {"clients": [{"password": UUID}]}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/trojan-argo"}}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}}
+            ],
+            "dns": {"servers": ["https+local://8.8.8.8/dns-query"]},
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "block"}]
+        }
+        json_bytes = json.dumps(cfg, indent=2).encode("utf-8")
+        st.session_state.generated["config.json"] = json_bytes
+        log("Generated config.json")
+        download_response_file("config.json", json_bytes)
+
+    st.markdown("---")
+    st.header("2) Generate Nezha config (config.yaml)")
+    if st.button("Generate config.yaml (nezha client)"):
+        if not NEZHA_KEY:
+            st.warning("NEZHA_KEY is empty — still generated but please fill NEZHA_KEY for real use.")
+        tls_ports = {"443", "8443", "2096", "2087", "2083", "2053"}
+        port_token = NEZHA_SERVER.split(":")[-1] if NEZHA_SERVER else ""
+        nezhatls = "true" if port_token in tls_ports else "false"
+        yaml_content = textwrap.dedent(f"""\
+            client_secret: {NEZHA_KEY}
+            debug: false
+            disable_auto_update: true
+            disable_command_execute: false
+            disable_force_update: true
+            disable_nat: false
+            disable_send_query: false
+            gpu: false
+            insecure_tls: true
+            ip_report_period: 1800
+            report_delay: 4
+            server: {NEZHA_SERVER}
+            skip_connection_count: true
+            skip_procs_count: true
+            temperature: false
+            tls: {nezhatls}
+            use_gitee_to_upgrade: false
+            use_ipv6_country_code: false
+            uuid: {UUID}
+        """)
+        st.session_state.generated["config.yaml"] = yaml_content.encode("utf-8")
+        log("Generated config.yaml")
+        download_response_file("config.yaml", yaml_content.encode("utf-8"))
+
+    st.markdown("---")
+    st.header("3) Generate tunnel.yml (Cloudflare tunnel)")
+
+    if st.button("Generate tunnel.yml (TunnelSecret mode)"):
+        if "TunnelSecret" in ARGO_AUTH:
             try:
-                if os.path.isfile(file_path):
-                    os.unlink(file_path)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                # try to find tunnel id inside JSON if provided
+                credentials = json.loads(ARGO_AUTH)
+                # best-effort extraction for tunnel id via keys/values
+                tunnel_id = ""
+                # the Node script used ARGO_AUTH.split('"')[11] to pick tunnel id — we attempt to find an id key
+                if isinstance(credentials, dict):
+                    # flatten and try to find something that looks like an id
+                    found = []
+                    def find_strings(obj):
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                find_strings(v)
+                        elif isinstance(obj, list):
+                            for it in obj:
+                                find_strings(it)
+                        elif isinstance(obj, str):
+                            found.append(obj)
+                    find_strings(credentials)
+                    # pick the first string that looks like an uuid-ish
+                    for s in found:
+                        if re.match(r"^[0-9a-fA-F\-]{8,}$", s):
+                            tunnel_id = s
+                            break
+                if not tunnel_id:
+                    tunnel_id = "TUNNEL_ID_NOT_FOUND"
+                yaml_tunnel = textwrap.dedent(f"""\
+                  tunnel: {tunnel_id}
+                  credentials-file: {Path(FILE_PATH) / 'tunnel.json'}
+                  protocol: http2
 
-# 生成 xray 配置文件
-def generate_config():
-    config = {
-        "log": {"access": "/dev/null", "error": "/dev/null", "loglevel": "none"},
-        "inbounds": [
-            {
-                "port": ARGO_PORT,
-                "protocol": "vless",
-                "settings": {
-                    "clients": [{"id": UUID, "flow": "xtls-rprx-vision"}],
-                    "decryption": "none",
-                    "fallbacks": [
-                        {"dest": 3001},
-                        {"path": "/vless-argo", "dest": 3002},
-                        {"path": "/vmess-argo", "dest": 3003},
-                        {"path": "/trojan-argo", "dest": 3004}
-                    ]
-                },
-                "streamSettings": {"network": "tcp"}
-            },
-            {
-                "port": 3001,
-                "listen": "127.0.0.1",
-                "protocol": "vless",
-                "settings": {"clients": [{"id": UUID}], "decryption": "none"},
-                "streamSettings": {"network": "tcp", "security": "none"}
-            },
-            {
-                "port": 3002,
-                "listen": "127.0.0.1",
-                "protocol": "vless",
-                "settings": {"clients": [{"id": UUID, "level": 0}], "decryption": "none"},
-                "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vless-argo"}},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}
-            },
-            {
-                "port": 3003,
-                "listen": "127.0.0.1",
-                "protocol": "vmess",
-                "settings": {"clients": [{"id": UUID, "alterId": 0}]},
-                "streamSettings": {"network": "ws", "wsSettings": {"path": "/vmess-argo"}},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}
-            },
-            {
-                "port": 3004,
-                "listen": "127.0.0.1",
-                "protocol": "trojan",
-                "settings": {"clients": [{"password": UUID}]},
-                "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/trojan-argo"}},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "metadataOnly": False}
-            }
-        ],
-        "dns": {"servers": ["https+local://8.8.8.8/dns-query"]},
-        "outbounds": [
-            {"protocol": "freedom", "tag": "direct"},
-            {"protocol": "blackhole", "tag": "block"}
-        ]
-    }
-    
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-
-# 获取系统架构
-def get_system_architecture():
-    arch = os.uname().machine
-    if 'arm' in arch or 'aarch' in arch:
-        return 'arm'
-    else:
-        return 'amd'
-
-# 下载文件
-def download_file(file_name, file_url):
-    try:
-        response = requests.get(file_url, stream=True)
-        response.raise_for_status()
-        
-        with open(file_name, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        # 设置文件权限
-        os.chmod(file_name, 0o775)
-        print(f"Download {os.path.basename(file_name)} successfully")
-        return True
-    except Exception as e:
-        print(f"Download {os.path.basename(file_name)} failed: {e}")
-        return False
-
-# 根据架构获取文件列表
-def get_files_for_architecture(architecture):
-    base_files = []
-    
-    if architecture == 'arm':
-        base_files = [
-            (web_path, "https://arm64.ssss.nyc.mn/web"),
-            (bot_path, "https://arm64.ssss.nyc.mn/bot")
-        ]
-    else:
-        base_files = [
-            (web_path, "https://amd64.ssss.nyc.mn/web"),
-            (bot_path, "https://amd64.ssss.nyc.mn/bot")
-        ]
-    
-    if NEZHA_SERVER and NEZHA_KEY:
-        if NEZHA_PORT:
-            npm_url = "https://arm64.ssss.nyc.mn/agent" if architecture == 'arm' else "https://amd64.ssss.nyc.mn/agent"
-            base_files.insert(0, (npm_path, npm_url))
+                  ingress:
+                    - hostname: {ARGO_DOMAIN}
+                      service: http://localhost:{ARGO_PORT}
+                      originRequest:
+                        noTLSVerify: true
+                    - service: http_status:404
+                """)
+                st.session_state.generated["tunnel.yml"] = yaml_tunnel.encode("utf-8")
+                st.session_state.generated["tunnel.json"] = ARGO_AUTH.encode("utf-8")
+                log("Generated tunnel.yml + tunnel.json (TunnelSecret path)")
+                download_response_file("tunnel.yml", yaml_tunnel.encode("utf-8"))
+                download_response_file("tunnel.json", ARGO_AUTH.encode("utf-8"))
+            except Exception as e:
+                st.error(f"Failed to parse ARGO_AUTH as JSON: {e}")
         else:
-            php_url = "https://arm64.ssss.nyc.mn/v1" if architecture == 'arm' else "https://amd64.ssss.nyc.mn/v1"
-            base_files.insert(0, (php_path, php_url))
-    
-    return base_files
+            st.warning("ARGO_AUTH does not contain TunnelSecret — token mode will be used on real host.")
 
-# 下载并运行文件
-def download_files_and_run():
-    architecture = get_system_architecture()
-    files_to_download = get_files_for_architecture(architecture)
-    
-    if not files_to_download:
-        print("Can't find files for the current architecture")
-        return
-    
-    # 下载文件
-    for file_name, file_url in files_to_download:
-        if not download_file(file_name, file_url):
-            return
-    
-    # 运行哪吒监控
-    if NEZHA_SERVER and NEZHA_KEY:
-        if not NEZHA_PORT:
-            # 哪吒 v1
-            port = NEZHA_SERVER.split(':')[-1] if ':' in NEZHA_SERVER else ''
-            tls_ports = ['443', '8443', '2096', '2087', '2083', '2053']
-            nezha_tls = 'true' if port in tls_ports else 'false'
-            
-            # 生成 config.yaml
-            config_yaml = f"""
-client_secret: {NEZHA_KEY}
-debug: false
-disable_auto_update: true
-disable_command_execute: false
-disable_force_update: true
-disable_nat: false
-disable_send_query: false
-gpu: false
-insecure_tls: true
-ip_report_period: 1800
-report_delay: 4
-server: {NEZHA_SERVER}
-skip_connection_count: true
-skip_procs_count: true
-temperature: false
-tls: {nezha_tls}
-use_gitee_to_upgrade: false
-use_ipv6_country_code: false
-uuid: {UUID}"""
-            
-            with open(os.path.join(FILE_PATH, 'config.yaml'), 'w') as f:
-                f.write(config_yaml)
-            
-            # 运行 v1
-            command = f"nohup {php_path} -c {FILE_PATH}/config.yaml >/dev/null 2>&1 &"
-            subprocess.run(command, shell=True)
-            print(f"{php_name} is running")
-            time.sleep(1)
-        else:
-            # 哪吒 v0
-            tls_ports = ['443', '8443', '2096', '2087', '2083', '2053']
-            nezha_tls = '--tls' if NEZHA_PORT in tls_ports else ''
-            
-            command = f"nohup {npm_path} -s {NEZHA_SERVER}:{NEZHA_PORT} -p {NEZHA_KEY} {nezha_tls} --disable-auto-update --report-delay 4 --skip-conn --skip-procs >/dev/null 2>&1 &"
-            subprocess.run(command, shell=True)
-            print(f"{npm_name} is running")
-            time.sleep(1)
-    else:
-        print('NEZHA variable is empty, skip running')
-    
-    # 运行 xray
-    command1 = f"nohup {web_path} -c {config_path} >/dev/null 2>&1 &"
-    subprocess.run(command1, shell=True)
-    print(f"{web_name} is running")
-    time.sleep(1)
-    
-    # 运行 cloudflared
-    if os.path.exists(bot_path):
-        if ARGO_AUTH and len(ARGO_AUTH) >= 120 and ARGO_AUTH.isalnum():
-            args = f"tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token {ARGO_AUTH}"
-        elif ARGO_AUTH and 'TunnelSecret' in ARGO_AUTH:
-            args = f"tunnel --edge-ip-version auto --config {FILE_PATH}/tunnel.yml run"
-        else:
-            args = f"tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile {boot_log_path} --loglevel info --url http://localhost:{ARGO_PORT}"
-        
-        command = f"nohup {bot_path} {args} >/dev/null 2>&1 &"
-        subprocess.run(command, shell=True)
-        print(f"{bot_name} is running")
-        time.sleep(2)
-    
-    time.sleep(5)
+    st.markdown("---")
+    st.header("4) Generate sub.txt (base64-encoded subscriptions)")
 
-# 配置 Argo 隧道
-def argo_type():
-    if not ARGO_AUTH or not ARGO_DOMAIN:
-        print("ARGO_DOMAIN or ARGO_AUTH variable is empty, use quick tunnels")
-        return
-    
-    if 'TunnelSecret' in ARGO_AUTH:
-        with open(os.path.join(FILE_PATH, 'tunnel.json'), 'w') as f:
-            f.write(ARGO_AUTH)
-        
-        # 解析 tunnel ID
-        try:
-            auth_data = json.loads(ARGO_AUTH)
-            tunnel_id = auth_data.get('TunnelSecret', '').split('"')[11] if 'TunnelSecret' in ARGO_AUTH else ''
-        except:
-            tunnel_id = ARGO_AUTH.split('"')[11] if '"' in ARGO_AUTH else ''
-        
-        tunnel_yaml = f"""
-tunnel: {tunnel_id}
-credentials-file: {os.path.join(FILE_PATH, 'tunnel.json')}
-protocol: http2
+    with st.form("sub_gen"):
+        node_name_custom = st.text_input("Node name (optional). If blank, ISP-based name will be used.", value="")
+        argo_domain_manual = st.text_input("Argo domain (if you have one)", value=ARGO_DOMAIN)
+        generate_button = st.form_submit_button("Generate sub.txt")
+        if generate_button:
+            # meta info imitation: original uses curl to get ISP + region; here we fallback to CFIP or NAME
+            isp = CFIP.replace(".", "_")
+            nodeName = f"{NAME}-{isp}" if NAME else isp
+            if node_name_custom.strip():
+                nodeName = node_name_custom.strip()
+            argoDomain = argo_domain_manual.strip()
+            if not argoDomain:
+                st.warning("No argo domain given — sub.txt will contain placeholders for host.")
+            VMESS = {"v": "2", "ps": nodeName, "add": CFIP, "port": CFPORT, "id": UUID, "aid": "0", "scy": "none", "net": "ws", "type": "none", "host": argoDomain or "ARGO_DOMAIN", "path": "/vmess-argo?ed=2560", "tls": "tls", "sni": argoDomain or "ARGO_DOMAIN", "alpn": "", "fp": "firefox"}
+            sub_txt = f"""vless://{UUID}@{CFIP}:{CFPORT}?encryption=none&security=tls&sni={argoDomain or CFIP}&fp=firefox&type=ws&host={argoDomain or CFIP}&path=%2Fvless-argo%3Fed%3D2560#{nodeName}
 
-ingress:
-  - hostname: {ARGO_DOMAIN}
-    service: http://localhost:{ARGO_PORT}
-    originRequest:
-      noTLSVerify: true
-  - service: http_status:404
+vmess://{base64.b64encode(json.dumps(VMESS).encode()).decode()}
+
+trojan://{UUID}@{CFIP}:{CFPORT}?security=tls&sni={argoDomain or CFIP}&fp=firefox&type=ws&host={argoDomain or CFIP}&path=%2Ftrojan-argo%3Fed%3D2560#{nodeName}
 """
-        with open(os.path.join(FILE_PATH, 'tunnel.yml'), 'w') as f:
-            f.write(tunnel_yaml)
-    else:
-        print("ARGO_AUTH mismatch TunnelSecret, use token connect to tunnel")
+            encoded = base64.b64encode(sub_txt.encode("utf-8"))
+            st.session_state.generated["sub.txt"] = encoded
+            st.session_state.generated["sub_plain"] = sub_txt.encode("utf-8")
+            log("Generated sub.txt (base64 encoded)")
+            st.success("sub.txt generated")
+            st.download_button("Download sub.txt (base64)", data=encoded, file_name="sub.txt")
+            st.download_button("Download sub_plain.txt (plain text)", data=sub_txt.encode("utf-8"), file_name="sub_plain.txt")
 
-# 提取域名并生成订阅
-def extract_domains():
-    argo_domain = None
-    
-    if ARGO_AUTH and ARGO_DOMAIN:
-        argo_domain = ARGO_DOMAIN
-        print('ARGO_DOMAIN:', argo_domain)
-        generate_links(argo_domain)
-    else:
-        try:
-            if os.path.exists(boot_log_path):
-                with open(boot_log_path, 'r') as f:
-                    content = f.read()
-                
-                import re
-                domains = re.findall(r'https?://([^ ]*trycloudflare\.com)/?', content)
-                
-                if domains:
-                    argo_domain = domains[0]
-                    print('ArgoDomain:', argo_domain)
-                    generate_links(argo_domain)
-                else:
-                    print('ArgoDomain not found, re-running bot to obtain ArgoDomain')
-                    # 重新运行 bot 获取域名
-                    if os.path.exists(boot_log_path):
-                        os.unlink(boot_log_path)
-                    
-                    # 终止现有进程
-                    subprocess.run(f"pkill -f {bot_name}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    time.sleep(3)
-                    
-                    args = f"tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile {boot_log_path} --loglevel info --url http://localhost:{ARGO_PORT}"
-                    command = f"nohup {bot_path} {args} >/dev/null 2>&1 &"
-                    subprocess.run(command, shell=True)
-                    print(f"{bot_name} is running")
-                    time.sleep(3)
-                    extract_domains()  # 重新提取
-        except Exception as e:
-            print(f'Error reading boot.log: {e}')
+    st.markdown("---")
+    st.header("5) Extract Argo domain from boot.log (upload or paste)")
 
-def generate_links(argo_domain):
-    # 获取地理位置信息
-    try:
-        result = subprocess.run(
-            'curl -sm 5 https://speed.cloudflare.com/meta | awk -F\\" \'{print $26"-"$18}\' | sed -e \'s/ /_/g\'',
-            shell=True, capture_output=True, text=True
-        )
-        isp = result.stdout.strip()
-    except:
-        isp = "Unknown"
-    
-    node_name = f"{NAME}-{isp}" if NAME else isp
-    
-    # 生成 VMESS 配置
-    vmess_config = {
-        "v": "2",
-        "ps": node_name,
-        "add": CFIP,
-        "port": CFPORT,
-        "id": UUID,
-        "aid": "0",
-        "scy": "none",
-        "net": "ws",
-        "type": "none",
-        "host": argo_domain,
-        "path": "/vmess-argo?ed=2560",
-        "tls": "tls",
-        "sni": argo_domain,
-        "alpn": "",
-        "fp": "firefox"
-    }
-    
-    vmess_base64 = base64.b64encode(json.dumps(vmess_config).encode()).decode()
-    
-    sub_txt = f"""
-vless://{UUID}@{CFIP}:{CFPORT}?encryption=none&security=tls&sni={argo_domain}&fp=firefox&type=ws&host={argo_domain}&path=%2Fvless-argo%3Fed%3D2560#{node_name}
-
-vmess://{vmess_base64}
-
-trojan://{UUID}@{CFIP}:{CFPORT}?security=tls&sni={argo_domain}&fp=firefox&type=ws&host={argo_domain}&path=%2Ftrojan-argo%3Fed%3D2560#{node_name}
-"""
-    
-    sub_base64 = base64.b64encode(sub_txt.encode()).decode()
-    print(sub_base64)
-    
-    with open(sub_path, 'w') as f:
-        f.write(sub_base64)
-    
-    print(f"{sub_path} saved successfully")
-    upload_nodes()
-
-# 上传节点或订阅
-def upload_nodes():
-    if UPLOAD_URL and PROJECT_URL:
-        subscription_url = f"{PROJECT_URL}/{SUB_PATH}"
-        json_data = {"subscription": [subscription_url]}
-        
-        try:
-            response = requests.post(f"{UPLOAD_URL}/api/add-subscriptions", 
-                                   json=json_data,
-                                   headers={'Content-Type': 'application/json'})
-            if response.status_code == 200:
-                print('Subscription uploaded successfully')
+    uploaded = st.file_uploader("Upload boot.log (optional)", type=["log", "txt"])
+    manual_log = st.text_area("—or paste boot.log contents here—", height=120)
+    if st.button("Extract Argo domain"):
+        content = ""
+        if uploaded is not None:
+            content = uploaded.read().decode("utf-8", errors="ignore")
+        elif manual_log.strip():
+            content = manual_log
+        else:
+            st.warning("No boot.log content supplied")
+        if content:
+            matches = re.findall(r"https?://([^ \n]*trycloudflare\.com)", content)
+            if matches:
+                domain = matches[0]
+                st.success(f"Found Argo domain: {domain}")
+                log(f"Extracted Argo domain from log: {domain}")
+                st.session_state.generated["extracted_argo_domain"] = domain
             else:
-                pass
-        except Exception:
-            pass
-    elif UPLOAD_URL:
-        if not os.path.exists(list_path):
-            return
-        
-        with open(list_path, 'r') as f:
-            content = f.read()
-        
-        nodes = [line for line in content.split('\n') if any(proto in line for proto in ['vless://', 'vmess://', 'trojan://', 'hysteria2://', 'tuic://'])]
-        
-        if nodes:
-            try:
-                response = requests.post(f"{UPLOAD_URL}/api/add-nodes",
-                                       json={'nodes': nodes},
-                                       headers={'Content-Type': 'application/json'})
-                if response.status_code == 200:
-                    print('Nodes uploaded successfully')
-            except Exception:
-                pass
-    else:
-        pass
+                st.info("No trycloudflare domain found in provided content")
 
-# 清理文件
-def clean_files():
-    def cleanup():
-        time.sleep(90)  # 90秒后清理
-        
-        files_to_delete = [boot_log_path, config_path, web_path, bot_path]
-        
-        if NEZHA_PORT and NEZHA_SERVER and NEZHA_KEY:
-            files_to_delete.append(npm_path)
-        elif NEZHA_SERVER and NEZHA_KEY:
-            files_to_delete.append(php_path)
-        
-        for file_path in files_to_delete:
-            try:
-                if os.path.exists(file_path):
-                    os.unlink(file_path)
-            except Exception:
-                pass
-        
-        print('App is running')
-        print('Thank you for using this script, enjoy!')
-    
-    threading.Thread(target=cleanup, daemon=True).start()
+    st.markdown("---")
+    st.header("6) Upload subscription / nodes (to UPLOAD_URL / PROJECT_URL)")
 
-# 自动访问任务
-def add_visit_task():
-    if not AUTO_ACCESS or not PROJECT_URL:
-        print("Skipping adding automatic access task")
-        return
-    
-    try:
-        response = requests.post('https://oooo.serv00.net/add-url',
-                               json={'url': PROJECT_URL},
-                               headers={'Content-Type': 'application/json'})
-        print('Automatic access task added successfully')
-        return response
-    except Exception as e:
-        print(f'Add automatic access task failed: {e}')
-        return None
+    st.write("This will perform the HTTP requests same as the original script. Make sure the target endpoints are reachable.")
+    with st.form("upload_form"):
+        upload_nodes_btn = st.form_submit_button("Upload nodes / subscriptions")
+        if upload_nodes_btn:
+            if not UPLOAD_URL:
+                st.error("UPLOAD_URL is empty — cannot upload.")
+            else:
+                # if both UPLOAD_URL and PROJECT_URL present -> add-subscriptions path
+                if UPLOAD_URL and PROJECT_URL:
+                    if "sub.txt" not in st.session_state.generated:
+                        st.error("No sub.txt generated. Generate it first.")
+                    else:
+                        subscriptionUrl = f"{PROJECT_URL}/{SUB_PATH}"
+                        jsonData = {"subscription": [subscriptionUrl]}
+                        try:
+                            resp = requests.post(f"{UPLOAD_URL}/api/add-subscriptions", json=jsonData, timeout=10)
+                            if resp.status_code == 200:
+                                st.success("Subscription uploaded successfully")
+                                log(f"Uploaded subscription to {UPLOAD_URL}/api/add-subscriptions")
+                            else:
+                                st.error(f"Upload returned status {resp.status_code}: {resp.text}")
+                                log(f"Upload failed status {resp.status_code}")
+                        except Exception as e:
+                            st.error(f"Upload error: {e}")
+                            log(f"Upload exception: {e}")
+                else:
+                    # UPLOAD_URL only -> send add-nodes; it reads list.txt in original, but here we will try sub_plain
+                    if "sub_plain" not in st.session_state.generated:
+                        st.error("No nodes/sub content generated. Generate sub.txt first.")
+                    else:
+                        nodes = [line for line in st.session_state.generated["sub_plain"].decode("utf-8").splitlines() if re.search(r"(vless|vmess|trojan|hysteria2|tuic):\/\/", line)]
+                        if not nodes:
+                            st.error("No nodes found in generated content.")
+                        else:
+                            jsonData = {"nodes": nodes}
+                            try:
+                                resp = requests.post(f"{UPLOAD_URL}/api/add-nodes", json=json.dumps(jsonData), headers={"Content-Type": "application/json"}, timeout=10)
+                                if resp.status_code == 200:
+                                    st.success("Nodes uploaded successfully")
+                                    log(f"Uploaded nodes to {UPLOAD_URL}/api/add-nodes")
+                                else:
+                                    st.error(f"Upload returned status {resp.status_code}: {resp.text}")
+                                    log(f"Upload failed status {resp.status_code}")
+                            except Exception as e:
+                                st.error(f"Upload error: {e}")
+                                log(f"Upload exception: {e}")
 
-# 启动后端服务
-def start_backend_server():
-    try:
-        delete_nodes()
-        cleanup_old_files()
-        argo_type()
-        generate_config()
-        download_files_and_run()
-        extract_domains()
-        add_visit_task()
-        clean_files()
-    except Exception as e:
-        print(f'Error in start_server: {e}')
-
-def run_http_server():
-    server = HTTPServer(('', PORT), SimpleHTTPRequestHandler)
-    print(f"HTTP server is running on port: {PORT}!")
-    server.serve_forever()
-
-# Streamlit 前端界面
-def run_streamlit_app():
-    st.set_page_config(page_title="Nodejs-Argo 状态面板", layout="centered")
-    
-    st.title("🚀 Nodejs-Argo 部署状态")
-    st.success("所有服务已启动 ✅")
-
-    # 显示订阅链接
-    sub_path = os.path.join(FILE_PATH, 'sub.txt')
-    if os.path.exists(sub_path):
-        with open(sub_path, "r") as f:
-            sub_raw = f.read()
+    st.markdown("---")
+    st.header("7) Add automatic access task (oooo.serv00.net)")
+    if st.button("Trigger automatic access (POST to https://oooo.serv00.net/add-url)"):
+        if not AUTO_ACCESS or not PROJECT_URL:
+            st.warning("AUTO_ACCESS disabled or PROJECT_URL empty — but request will still be attempted if you want.")
         try:
-            decoded = base64.b64decode(sub_raw).decode("utf-8")
-            st.subheader("📡 节点订阅链接")
-            for line in decoded.strip().split("\n"):
-                if line.strip():  # 只显示非空行
-                    st.code(line, language="text")
+            resp = requests.post("https://oooo.serv00.net/add-url", json={"url": PROJECT_URL}, timeout=10, headers={"Content-Type": "application/json"})
+            if resp.status_code == 200:
+                st.success("Automatic access task added")
+                log("Added automatic access task")
+            else:
+                st.error(f"Returned {resp.status_code}: {resp.text}")
+                log(f"AddVisitTask returned {resp.status_code}")
         except Exception as e:
-            st.error(f"订阅解码失败: {e}")
-    else:
-        st.warning("尚未生成订阅链接")
+            st.error(f"Request failed: {e}")
+            log(f"AddVisitTask exception: {e}")
 
-    # 显示 Argo 域名
-    argo_domain = os.getenv("ARGO_DOMAIN", "")
-    if argo_domain:
-        st.info(f"🌐 当前 Argo 域名: `{argo_domain}`")
-    else:
-        st.warning("未检测到 Argo 域名")
+with col2:
+    st.header("Status / Utilities")
+    st.write("Quick actions & info")
+    if st.button("Clear logs"):
+        st.session_state.logs = []
+        st.success("Logs cleared")
+    st.write("Generated artifacts in this session:")
+    for k in st.session_state.generated.keys():
+        st.write("-", k)
+    st.markdown("---")
+    st.header("Suggested download URLs for binaries (info only)")
+    base = "https://arm64.ssss.nyc.mn" if architecture == "arm" else "https://amd64.ssss.nyc.mn"
+    st.write("web:", f"{base}/web")
+    st.write("bot:", f"{base}/bot")
+    st.write("agent (nezha linux agent):", f"{base}/agent (if using NEZHA_PORT)")
+    st.write("v1 (nezha v1):", f"{base}/v1 (if using NEZHA v1)")
+    st.markdown("---")
+    st.header("Manual operations")
+    st.write("You can copy the generated contents and run them on your VPS where running binaries is allowed.")
 
-    # 显示 UUID
-    uuid = os.getenv("UUID", "")
-    if uuid:
-        st.text(f"🔑 UUID: {uuid}")
-    
-    # 显示服务状态
-    st.subheader("🔄 服务状态")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("哪吒监控", "运行中" if NEZHA_SERVER and NEZHA_KEY else "未配置")
-    
-    with col2:
-        st.metric("Xray 核心", "运行中")
-    
-    with col3:
-        st.metric("Cloudflared", "运行中")
+st.markdown("## Logs")
+with st.expander("Execution log (most recent at bottom)", expanded=True):
+    st.text("\n".join(st.session_state.logs[-200:]))
 
-# 主函数
-def main():
-    # 检查是否在 Streamlit 环境中运行
-    if 'streamlit' in sys.modules:
-        run_streamlit_app()
-    else:
-        # 启动后端服务线程
-        backend_thread = threading.Thread(target=start_backend_server, daemon=True)
-        backend_thread.start()
-        
-        # 启动 HTTP 服务器线程
-        http_thread = threading.Thread(target=run_http_server, daemon=True)
-        http_thread.start()
-        
-        # 启动 Streamlit
-        try:
-            # 设置 Streamlit 端口
-            streamlit_port = 8501
-            print(f"Starting Streamlit on port {streamlit_port}...")
-            
-            # 运行 Streamlit
-            import streamlit.web.bootstrap
-            from streamlit.web.cli import _main_run
-            
-            # 设置 Streamlit 配置
-            sys.argv = ["streamlit", "run", __file__, "--server.port", str(streamlit_port), "--server.headless", "true"]
-            _main_run()
-            
-        except Exception as e:
-            print(f"Streamlit启动失败: {e}")
-            # 如果 Streamlit 启动失败，继续运行其他服务
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                print("服务已停止")
-
-if __name__ == "__main__":
-    main()
+st.markdown("---")
+st.caption("说明：此 Streamlit 应用复刻了原脚本的**配置/上传/生成**逻辑，但未/不能执行系统层面的二进制操作（例如 nohup、chmod、pkill、运行 cloudflared）。若需完整运行请在 Linux VPS 上运行原生脚本或等价 Python 脚本（我也可以提供该脚本）。")
