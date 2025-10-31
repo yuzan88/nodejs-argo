@@ -528,7 +528,10 @@ def run_http_server():
     server.serve_forever()
 
 if __name__ == "__main__":
+    # 启动 Streamlit 页面
+    import subprocess
     subprocess.Popen("streamlit run streamlit_app.py", shell=True)
+
 
 
 
