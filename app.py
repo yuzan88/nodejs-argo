@@ -527,9 +527,15 @@ def run_http_server():
     print(f"HTTP server is running on port: {PORT}!")
     server.serve_forever()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    # 你原来的主逻辑
+    # 比如：
+    main()
+
     # 启动 Streamlit 页面
-subprocess.Popen("streamlit run streamlit_app.py", shell=True)
+    subprocess.Popen("streamlit run streamlit_app.py", shell=True)
+
+
 
 
 
