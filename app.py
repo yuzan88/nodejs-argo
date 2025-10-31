@@ -25,7 +25,7 @@ NEZHA_PORT = os.getenv('NEZHA_PORT', '')
 NEZHA_KEY = os.getenv('NEZHA_KEY', 'uK6lptvEoZ7TsX6yzjOxSd3RYeGCHCJj')
 ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', 'py.a.5.a.f.0.7.4.0.1.0.0.2.ip6.arpa')
 ARGO_AUTH = os.getenv('ARGO_AUTH', 'eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2MWVkN2YiLCJ0IjoiYzM5ZWU3NjYtMGU1YS00MTQzLTk1YWEtZjA5MDdhNjZmMjNmIiwicyI6Ik5ESmpaRFEyTmpFdE5tTXdNQzAwTVRrMExUazBPVFl0WkdWbE9EazRNRFpsWVdKaiJ9')
-ARGO_PORT = int(os.getenv('ARGO_PORT', '8001'))
+ARGO_PORT = int(os.getenv('ARGO_PORT', '8501'))
 CFIP = os.getenv('CFIP', 'cdns.doon.eu.org')
 CFPORT = int(os.getenv('CFPORT', '443'))
 NAME = os.getenv('NAME', 'Streamlit')
@@ -529,6 +529,7 @@ def run_http_server():
 
 if __name__ == "__main__":
     subprocess.Popen("streamlit run streamlit_app.py", shell=True)
+
 
 
 
