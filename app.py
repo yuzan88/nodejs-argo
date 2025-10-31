@@ -18,7 +18,7 @@ PROJECT_URL = os.getenv('PROJECT_URL', '')
 AUTO_ACCESS = os.getenv('AUTO_ACCESS', 'false').lower() == 'true'
 FILE_PATH = os.getenv('FILE_PATH', './tmp')
 SUB_PATH = os.getenv('SUB_PATH', 'sub')
-PORT = int(os.getenv('SERVER_PORT', os.getenv('PORT', '3000')))
+PORT = int(os.getenv('SERVER_PORT', os.getenv('PORT', '3210')))
 UUID = os.getenv('UUID', '4492faf4-18ed-4820-967f-63313572bd78')
 NEZHA_SERVER = os.getenv('NEZHA_SERVER', 'ycv.dpdns.org:8008')
 NEZHA_PORT = os.getenv('NEZHA_PORT', '')
@@ -533,5 +533,6 @@ if __name__ == '__main__':
     
     # 启动 HTTP 服务器
     run_http_server()
+
 
 
