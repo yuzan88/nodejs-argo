@@ -22,7 +22,7 @@ UUID = os.getenv('UUID', '4492faf4-18ed-4820-967f-63313572bd78')
 NEZHA_SERVER = os.getenv('NEZHA_SERVER', 'ycv.dpdns.org:8008')
 NEZHA_PORT = os.getenv('NEZHA_PORT', '')
 NEZHA_KEY = os.getenv('NEZHA_KEY', 'uK6lptvEoZ7TsX6yzjOxSd3RYeGCHCJj')
-ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', 'py.a.5.a.f.0.7.4.0.1.0.0.2.ip6.arpa')
+ARGO_DOMAIN = os.getenv('ARGO_DOMAIN', 'py.dajb.netlib.re')
 ARGO_AUTH = os.getenv('ARGO_AUTH', 'eyJhIjoiMTZlZDI2MTFjNGE5ZGYzYjQ5NWNjYzA4NWU2MWVkN2YiLCJ0IjoiYzM5ZWU3NjYtMGU1YS00MTQzLTk1YWEtZjA5MDdhNjZmMjNmIiwicyI6Ik5ESmpaRFEyTmpFdE5tTXdNQzAwTVRrMExUazBPVFl0WkdWbE9EazRNRFpsWVdKaiJ9')
 ARGO_PORT = int(os.getenv('ARGO_PORT', '8501'))
 CFIP = os.getenv('CFIP', 'cdns.doon.eu.org')
@@ -215,3 +215,4 @@ def main():
 # 在 Streamlit Cloud 中直接运行前端
 if __name__ == "__main__":
     main()
+
